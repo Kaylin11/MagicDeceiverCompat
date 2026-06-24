@@ -1,0 +1,11 @@
+{
+  "Id": "MagicDeceiverCompat",
+  "DisplayName": "Magic Deceiver Compat",
+  "Author": "Kay",
+  "Version": "0.1.0",
+  "ManagerVersion": "0.27.11",
+  "Requirements": [],
+  "LoadAfter": [ "deceiverbuff", "PrestigePlus", "TabletopTweaks-Core", "0ToyBox0" ],
+  "AssemblyName": "MagicDeceiverCompat.dll",
+  "EntryMethod": "MagicDeceiverCompat.Main.Load"
+}

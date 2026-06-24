@@ -1,0 +1,19 @@
+# Build output
+bin/
+obj/
+
+# Local editor and OS files
+.vs/
+.vscode/
+*.user
+*.suo
+*.tmp
+Thumbs.db
+Desktop.ini
+
+# Local release artifacts
+release/
+*.zip
+
+# Unity Mod Manager cache files
+*.cache
