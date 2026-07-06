@@ -51,6 +51,7 @@ public static class Main
 
     internal static UnityModManager.ModEntry.ModLogger Logger;
     private static bool _initialized;
+    private static readonly HashSet<SpellbookPCView> KnownSpellbookViews = new HashSet<SpellbookPCView>();
     private static readonly Dictionary<SpellbookPCView, ButtonLayoutSnapshot> ButtonLayouts =
         new Dictionary<SpellbookPCView, ButtonLayoutSnapshot>();
     private static readonly Dictionary<SpellbookPCView, SpellbookButtonMode> ButtonModes =
@@ -243,10 +244,14 @@ public static class Main
                     return;
                 }
 
-                if (spellbook.Blueprint.AssetGuidThreadSafe == MagicDeceiverSpellbookGuid)
+                var isMagicDeceiver = IsMagicDeceiverSpellbook(spellbook);
+                __instance.MagicalHackAvailable.Value = isMagicDeceiver;
+                if (isMagicDeceiver)
                 {
                     __instance.MetamagicAvailable.Value = true;
                 }
+
+                RefreshAllSpellbookViews();
             }
             catch (Exception ex)
             {
@@ -345,7 +350,8 @@ public static class Main
                     return;
                 }
 
-                __result = __instance.MagicHackData.SpellLevel + __instance.MetamagicData.SpellLevelCost;
+                var fallbackLevel = GetMagicHackEffectiveSpellLevel(__instance);
+                __result = Math.Max(__result, fallbackLevel);
             }
             catch (Exception ex)
             {
@@ -386,7 +392,17 @@ public static class Main
     {
         private static void Postfix(SpellbookPCView __instance)
         {
+            RegisterSpellbookView(__instance);
             TryShowBothMagicDeceiverButtons(__instance);
+        }
+    }
+
+    [HarmonyPatch(typeof(SpellbookPCView), "DestroyViewImplementation")]
+    private static class SpellbookPCView_DestroyViewImplementation_Patch
+    {
+        private static void Prefix(SpellbookPCView __instance)
+        {
+            UnregisterSpellbookView(__instance);
         }
     }
 
@@ -434,14 +450,10 @@ public static class Main
     {
         try
         {
-            var viewModel = Traverse.Create(view).Property("ViewModel").GetValue<object>();
-            var currentSpellbook = Traverse.Create(viewModel).Field("CurrentSpellbook").GetValue<object>();
-            var spellbook = currentSpellbook == null
-                ? null
-                : Traverse.Create(currentSpellbook).Property("Value").GetValue<Kingmaker.UnitLogic.Spellbook>();
-            if (spellbook == null || spellbook.Blueprint == null || spellbook.Blueprint.AssetGuidThreadSafe != MagicDeceiverSpellbookGuid)
+            var spellbook = GetCurrentSpellbook(view);
+            if (!IsMagicDeceiverSpellbook(spellbook))
             {
-                RestoreButtonLayout(view);
+                RestoreDefaultButtonLayout(view);
                 return;
             }
 
@@ -529,6 +541,30 @@ public static class Main
         EnsureMagicHackIconSource(spell);
     }
 
+    private static Kingmaker.UnitLogic.Spellbook GetCurrentSpellbook(SpellbookPCView view)
+    {
+        if (view == null)
+        {
+            return null;
+        }
+
+        var viewModel = Traverse.Create(view).Property("ViewModel").GetValue<object>();
+        var currentSpellbook = viewModel == null
+            ? null
+            : Traverse.Create(viewModel).Field("CurrentSpellbook").GetValue<object>();
+
+        return currentSpellbook == null
+            ? null
+            : Traverse.Create(currentSpellbook).Property("Value").GetValue<Kingmaker.UnitLogic.Spellbook>();
+    }
+
+    private static bool IsMagicDeceiverSpellbook(Kingmaker.UnitLogic.Spellbook spellbook)
+    {
+        return spellbook != null
+            && spellbook.Blueprint != null
+            && spellbook.Blueprint.AssetGuidThreadSafe == MagicDeceiverSpellbookGuid;
+    }
+
     private static void SyncMagicHackSpellLevel(AbilityData ability, int spellLevel)
     {
         if (ability == null || ability.MagicHackData == null)
@@ -536,16 +572,44 @@ public static class Main
             return;
         }
 
-        var metamagicCost = ability.MetamagicData == null ? 0 : ability.MetamagicData.SpellLevelCost;
-        var baseLevel = Math.Max(0, spellLevel - metamagicCost);
+        var previousBaseLevel = ability.MagicHackData.SpellLevel;
+        var metamagicAdjustment = GetMagicHackMetamagicAdjustment(ability, previousBaseLevel);
+        var baseLevel = Math.Max(0, spellLevel - metamagicAdjustment);
         ability.MagicHackData.SpellLevel = baseLevel;
-        ability.OverrideSpellLevel = null;
+        ability.OverrideSpellLevel = spellLevel;
 
         var field = AccessTools.Field(typeof(AbilityData), "<SpellLevelInSpellbook>k__BackingField");
         if (field != null)
         {
             field.SetValue(ability, null);
         }
+    }
+
+    private static int GetMagicHackEffectiveSpellLevel(AbilityData ability)
+    {
+        if (ability == null || ability.MagicHackData == null)
+        {
+            return 0;
+        }
+
+        var baseLevel = ability.MagicHackData.SpellLevel;
+        return baseLevel + GetMagicHackMetamagicAdjustment(ability, baseLevel);
+    }
+
+    private static int GetMagicHackMetamagicAdjustment(AbilityData ability, int baseLevel)
+    {
+        if (ability == null || ability.MetamagicData == null)
+        {
+            return 0;
+        }
+
+        var metamagicAdjustment = ability.MetamagicData.SpellLevelCost;
+        if (ability.MetamagicData.Has(Metamagic.Heighten))
+        {
+            metamagicAdjustment += Math.Max(0, ability.MetamagicData.HeightenLevel - baseLevel);
+        }
+
+        return metamagicAdjustment;
     }
 
     private static void EnsureMagicHackIconSource(AbilityData ability)
@@ -597,16 +661,33 @@ public static class Main
             magicHackLabel);
     }
 
-    private static void RestoreButtonLayout(SpellbookPCView view)
+    private static void RestoreDefaultButtonLayout(SpellbookPCView view)
     {
         ButtonLayoutSnapshot snapshot;
-        if (view == null || !ButtonLayouts.TryGetValue(view, out snapshot))
+        if (view == null)
         {
             return;
         }
 
-        snapshot.Restore();
-        ButtonLayouts.Remove(view);
+        if (ButtonLayouts.TryGetValue(view, out snapshot))
+        {
+            snapshot.Restore();
+            ButtonLayouts.Remove(view);
+        }
+
+        ButtonModes.Remove(view);
+
+        var metamagicButton = AccessTools.Field(typeof(SpellbookPCView), "m_MetamagicButton").GetValue(view) as OwlcatButton;
+        var magicHackButton = AccessTools.Field(typeof(SpellbookPCView), "m_MagicHackButton").GetValue(view) as OwlcatButton;
+        if (metamagicButton != null)
+        {
+            metamagicButton.gameObject.SetActive(true);
+        }
+
+        if (magicHackButton != null)
+        {
+            magicHackButton.gameObject.SetActive(false);
+        }
     }
 
     private static void SetButtonMode(SpellbookPCView view, SpellbookButtonMode mode)
@@ -665,6 +746,39 @@ public static class Main
         }
 
         return button.transform as RectTransform;
+    }
+
+    private static void RegisterSpellbookView(SpellbookPCView view)
+    {
+        if (view != null)
+        {
+            KnownSpellbookViews.Add(view);
+        }
+    }
+
+    private static void UnregisterSpellbookView(SpellbookPCView view)
+    {
+        if (view == null)
+        {
+            return;
+        }
+
+        KnownSpellbookViews.Remove(view);
+        ButtonLayouts.Remove(view);
+        ButtonModes.Remove(view);
+    }
+
+    private static void RefreshAllSpellbookViews()
+    {
+        foreach (var view in KnownSpellbookViews.ToArray())
+        {
+            if (view == null)
+            {
+                continue;
+            }
+
+            TryShowBothMagicDeceiverButtons(view);
+        }
     }
 
     private enum SpellbookButtonMode
